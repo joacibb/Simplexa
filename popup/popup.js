@@ -126,6 +126,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     function sendMessage(message) {
         return new Promise((resolve) => {
             chrome.runtime.sendMessage(message, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.warn('[Simplexa Popup]', chrome.runtime.lastError.message);
+                    resolve(null);
+                    return;
+                }
                 resolve(response);
             });
         });

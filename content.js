@@ -12,6 +12,8 @@
     let overlayRoot = null;
     let shadowRoot = null;
     let isActive = false;
+    let elementIdCounter = 0;
+    const elementMap = new Map(); // simplexa-id → DOM node
 
     // ── Selectores de elementos interactivos ─────────────────────────────
 
@@ -38,6 +40,14 @@
         autocomplete: /cc-|new-password|current-password|credit-card/i
     };
 
+    // Dominios legítimos conocidos que suelen ser imitados (phishing)
+    const TRUSTED_DOMAINS = [
+        'google.com', 'facebook.com', 'amazon.com', 'apple.com', 'microsoft.com',
+        'paypal.com', 'netflix.com', 'instagram.com', 'twitter.com', 'x.com',
+        'linkedin.com', 'whatsapp.com', 'mercadolibre.com', 'mercadopago.com',
+        'bankofamerica.com', 'chase.com', 'wellsfargo.com'
+    ];
+
     // ── Escaneo del DOM ──────────────────────────────────────────────────
 
     /**
@@ -48,6 +58,10 @@
         const elements = [];
         const selector = INTERACTIVE_SELECTORS.join(', ');
         const nodes = document.querySelectorAll(selector);
+
+        // Limpiar estado previo
+        elementIdCounter = 0;
+        elementMap.clear();
 
         // Limitar a 80 elementos para no saturar contexto del LLM
         const maxElements = 80;
@@ -81,7 +95,13 @@
      */
     function extractElementData(node) {
         const tag = node.tagName.toLowerCase();
-        const data = { tag };
+
+        // Asignar ID único al elemento para mapear la respuesta de la IA
+        const simplexaId = `sx-${elementIdCounter++}`;
+        node.setAttribute('data-simplexa-id', simplexaId);
+        elementMap.set(simplexaId, node);
+
+        const data = { id: simplexaId, tag };
 
         // Texto visible del elemento
         const text = getVisibleText(node);
@@ -221,6 +241,109 @@
         }
     }
 
+    // ── Detección de Seguridad del Sitio ─────────────────────────────────
+
+    /**
+     * Analiza la seguridad del sitio actual.
+     * @returns {object} { level: 'safe'|'warning'|'danger', reasons: string[] }
+     */
+    function analyzeSiteSafety() {
+        const reasons = [];
+        let level = 'safe';
+        const url = window.location;
+
+        // 1. Verificar HTTPS
+        if (url.protocol !== 'https:') {
+            reasons.push('Este sitio NO usa conexión segura (HTTPS). Tu información podría ser leída por otros.');
+            level = 'danger';
+        }
+
+        // 2. Verificar dominio sospechoso (typosquatting)
+        const hostname = url.hostname.toLowerCase();
+        const hostBase = hostname.split('.').slice(0, -1).join('.'); // sin TLD
+        for (const trusted of TRUSTED_DOMAINS) {
+            const base = trusted.split('.')[0];
+            // Ignorar dominios base muy cortos (ej: "x") — demasiados falsos positivos
+            if (base.length < 5) continue;
+            // Solo alertar si el hostname contiene una variación cercana del dominio confiable
+            // pero NO es el dominio real
+            if (hostname.endsWith(trusted)) continue;
+            // Comparar: el nombre base del host debe contener al menos el 80% del dominio confiable
+            const threshold = Math.ceil(base.length * 0.8);
+            const baseChunk = base.slice(0, threshold);
+            if (hostBase.includes(baseChunk) && hostBase !== base) {
+                reasons.push(`Este sitio se parece a ${trusted} pero NO es el sitio oficial. ¡Cuidado!`);
+                level = 'danger';
+            }
+        }
+
+        // 3. Dominio con IP directa (sospechoso)
+        if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+            reasons.push('Este sitio usa una dirección IP en lugar de un nombre normal. Esto es inusual.');
+            level = level === 'safe' ? 'warning' : level;
+        }
+
+        // 4. Subdominios excesivos (sospechoso)
+        const subdomainCount = hostname.split('.').length - 2;
+        if (subdomainCount > 3) {
+            reasons.push('Este sitio tiene una dirección web muy larga y compleja. Verificalo con cuidado.');
+            level = level === 'safe' ? 'warning' : level;
+        }
+
+        // 5. Formularios con datos sensibles en HTTP
+        if (url.protocol !== 'https:') {
+            const hasPasswordField = document.querySelector('input[type="password"]');
+            if (hasPasswordField) {
+                reasons.push('¡ATENCIÓN! Te piden una contraseña en un sitio SIN conexión segura. No la escribas.');
+                level = 'danger';
+            }
+        }
+
+        // 6. Contenido mixto (HTTPS con recursos HTTP)
+        if (url.protocol === 'https:') {
+            const insecureResources = document.querySelectorAll(
+                'script[src^="http:"], iframe[src^="http:"], form[action^="http:"]'
+            );
+            if (insecureResources.length > 0) {
+                reasons.push('Esta página mezcla contenido seguro e inseguro. Tené precaución.');
+                level = level === 'safe' ? 'warning' : level;
+            }
+        }
+
+        // Mensaje positivo si todo está bien
+        if (reasons.length === 0) {
+            reasons.push('Conexión segura (HTTPS). El sitio parece confiable.');
+        }
+
+        return { level, reasons };
+    }
+
+    /**
+     * Genera HTML del banner de seguridad para el overlay.
+     */
+    function buildSafetyBanner(safety) {
+        const colors = {
+            safe: { bg: 'rgba(52, 211, 153, 0.12)', border: '#34d399', icon: '✅', text: '#6ee7b7' },
+            warning: { bg: 'rgba(251, 191, 36, 0.12)', border: '#fbbf24', icon: '⚠️', text: '#fde68a' },
+            danger: { bg: 'rgba(239, 68, 68, 0.15)', border: '#ef4444', icon: '🚨', text: '#fca5a5' }
+        };
+        const c = colors[safety.level];
+        const reasonsHTML = safety.reasons.map(r => `<div style="font-size:14px;margin:3px 0;">• ${r}</div>`).join('');
+
+        return `<div style="
+            background:${c.bg};
+            border:1px solid ${c.border};
+            border-radius:10px;
+            padding:10px 14px;
+            margin-bottom:12px;
+        ">
+            <div style="font-weight:600;font-size:15px;color:${c.text};margin-bottom:4px;">
+                ${c.icon} Seguridad del sitio
+            </div>
+            <div style="color:${c.text};opacity:0.9;">${reasonsHTML}</div>
+        </div>`;
+    }
+
     // ── Shadow DOM Overlay ───────────────────────────────────────────────
 
     /**
@@ -254,6 +377,7 @@
         <button class="simplexa-close" aria-label="Cerrar Simplexa">✕</button>
       </div>
       <div class="simplexa-content">
+        <div class="simplexa-safety"></div>
         <div class="simplexa-loading">
           <div class="simplexa-spinner"></div>
           <p class="simplexa-loading-text">Analizando la página...</p>
@@ -261,13 +385,24 @@
             <div class="simplexa-progress-fill"></div>
           </div>
         </div>
-        <div class="simplexa-instructions" style="display: none;"></div>
+        <div class="simplexa-chat-area" style="display: none;"></div>
+      </div>
+      <div class="simplexa-chat-input-area" style="display: none;">
+        <input type="text" class="simplexa-chat-input" placeholder="Preguntame sobre esta página..." />
+        <button class="simplexa-chat-send" aria-label="Enviar pregunta">➤</button>
       </div>
       <div class="simplexa-footer">
         <span>🔒 Todo se procesa en tu dispositivo</span>
       </div>
     `;
         shadowRoot.appendChild(container);
+
+        // Analizar y mostrar seguridad del sitio inmediatamente
+        const safety = analyzeSiteSafety();
+        const safetyContainer = shadowRoot.querySelector('.simplexa-safety');
+        if (safetyContainer) {
+            safetyContainer.innerHTML = buildSafetyBanner(safety);
+        }
 
         // Evento de cierre
         const closeBtn = shadowRoot.querySelector('.simplexa-close');
@@ -276,24 +411,166 @@
             chrome.runtime.sendMessage({ type: 'DEACTIVATE_TAB' });
         });
 
+        // Eventos del chat
+        const chatInput = shadowRoot.querySelector('.simplexa-chat-input');
+        const chatSendBtn = shadowRoot.querySelector('.simplexa-chat-send');
+
+        chatSendBtn.addEventListener('click', () => handleChatSubmit());
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleChatSubmit();
+            }
+        });
+
         document.documentElement.appendChild(overlayRoot);
     }
 
     /**
-     * Muestra las instrucciones simplificadas en el overlay.
+     * Muestra el resumen de la página en el chat area.
+     * @param {string} summary - Resumen generado por la IA
      */
-    function showInstructions(text) {
+    function showSummary(summary) {
         if (!shadowRoot) return;
 
         const loading = shadowRoot.querySelector('.simplexa-loading');
-        const instructions = shadowRoot.querySelector('.simplexa-instructions');
+        const chatArea = shadowRoot.querySelector('.simplexa-chat-area');
+        const chatInputArea = shadowRoot.querySelector('.simplexa-chat-input-area');
 
         if (loading) loading.style.display = 'none';
-        if (instructions) {
-            // Convertir las instrucciones en HTML con formato
-            instructions.innerHTML = formatInstructions(text);
-            instructions.style.display = 'block';
+        if (chatArea) {
+            chatArea.style.display = 'block';
+            addChatMessage('assistant', summary);
         }
+        if (chatInputArea) {
+            chatInputArea.style.display = 'flex';
+            // Focus en el input
+            const input = shadowRoot.querySelector('.simplexa-chat-input');
+            if (input) setTimeout(() => input.focus(), 100);
+        }
+    }
+
+    /**
+     * Agrega un mensaje al área de chat.
+     * @param {'user'|'assistant'} role - Quién envió el mensaje
+     * @param {string} text - Contenido del mensaje
+     */
+    function addChatMessage(role, text) {
+        if (!shadowRoot) return;
+        const chatArea = shadowRoot.querySelector('.simplexa-chat-area');
+        if (!chatArea) return;
+
+        const msg = document.createElement('div');
+        msg.className = `simplexa-msg simplexa-msg-${role}`;
+
+        const avatar = role === 'assistant' ? '✦' : '👤';
+        const formattedText = formatMessageText(text);
+
+        msg.innerHTML = `
+            <span class="simplexa-msg-avatar">${avatar}</span>
+            <div class="simplexa-msg-bubble">${formattedText}</div>
+        `;
+        chatArea.appendChild(msg);
+
+        // Scroll al último mensaje
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    /**
+     * Muestra un indicador de "escribiendo..." en el chat.
+     */
+    function showTypingIndicator() {
+        if (!shadowRoot) return;
+        const chatArea = shadowRoot.querySelector('.simplexa-chat-area');
+        if (!chatArea) return;
+
+        const typing = document.createElement('div');
+        typing.className = 'simplexa-msg simplexa-msg-assistant simplexa-typing';
+        typing.innerHTML = `
+            <span class="simplexa-msg-avatar">✦</span>
+            <div class="simplexa-msg-bubble"><span class="simplexa-dots">Pensando<span>.</span><span>.</span><span>.</span></span></div>
+        `;
+        chatArea.appendChild(typing);
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    /**
+     * Remueve el indicador de "escribiendo...".
+     */
+    function removeTypingIndicator() {
+        if (!shadowRoot) return;
+        const typing = shadowRoot.querySelector('.simplexa-typing');
+        if (typing) typing.remove();
+    }
+
+    /**
+     * Maneja el envío de un mensaje del usuario.
+     */
+    async function handleChatSubmit() {
+        if (!shadowRoot) return;
+
+        const input = shadowRoot.querySelector('.simplexa-chat-input');
+        const sendBtn = shadowRoot.querySelector('.simplexa-chat-send');
+        if (!input) return;
+
+        const question = input.value.trim();
+        if (!question) return;
+
+        // Mostrar pregunta del usuario
+        addChatMessage('user', question);
+        input.value = '';
+        input.disabled = true;
+        sendBtn.disabled = true;
+
+        // Mostrar indicador de carga
+        showTypingIndicator();
+
+        try {
+            // Enviar pregunta al offscreen via background
+            const result = await chrome.runtime.sendMessage({
+                type: 'REQUEST_CHAT',
+                question
+            });
+
+            removeTypingIndicator();
+
+            if (result?.ok) {
+                addChatMessage('assistant', result.reply);
+            } else {
+                addChatMessage('assistant', result?.error || 'No pude procesar tu pregunta.');
+            }
+        } catch (err) {
+            removeTypingIndicator();
+            addChatMessage('assistant', 'Perdón, no pude procesar tu pregunta. Intentá de nuevo.');
+        }
+
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+    }
+
+    /**
+     * Formatea texto de mensaje: convierte saltos de línea, emojis, y listas.
+     */
+    function formatMessageText(text) {
+        return text
+            .split('\n')
+            .map(line => {
+                const trimmed = line.trim();
+                if (!trimmed) return '';
+                // Líneas que empiezan con emoji o bullet
+                if (/^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(trimmed)) {
+                    return `<div class="simplexa-msg-item">${trimmed}</div>`;
+                }
+                if (/^[-•*]\s/.test(trimmed)) {
+                    return `<div class="simplexa-msg-item">• ${trimmed.slice(2)}</div>`;
+                }
+                if (/^\d+[.)\s]/.test(trimmed)) {
+                    return `<div class="simplexa-msg-item">${trimmed}</div>`;
+                }
+                return `<p style="margin:4px 0;">${trimmed}</p>`;
+            })
+            .join('');
     }
 
     /**
@@ -333,38 +610,83 @@
         if (loadingText && text) loadingText.textContent = text;
     }
 
+
     /**
-     * Formatea instrucciones de texto plano a HTML legible.
+     * Aplica las etiquetas simplificadas directamente sobre los elementos de la página.
+     * Agrega badges visuales junto a cada elemento para guiar al usuario.
+     * @param {object} labelsMap - Mapa {elementId: "etiqueta"}
      */
-    function formatInstructions(text) {
-        // Dividir por líneas y formatear
-        const lines = text.split('\n').filter(l => l.trim());
-        let html = '';
+    function applyLabelsToPage(labelsMap) {
+        for (const [id, label] of Object.entries(labelsMap)) {
+            const node = elementMap.get(id);
+            if (!node) continue;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
+            // No modificar el contenido de campos sensibles
+            if (node.getAttribute('data-simplexa-sensitive') === 'true') continue;
 
-            // Detectar pasos numerados: "1.", "1)", "Paso 1:"
-            const stepMatch = trimmed.match(/^(\d+)[.):\s-]+\s*(.+)/);
-            if (stepMatch) {
-                html += `<div class="simplexa-step">
-          <span class="simplexa-step-number">${stepMatch[1]}</span>
-          <span class="simplexa-step-text">${stepMatch[2]}</span>
-        </div>`;
-            } else if (trimmed.startsWith('•') || trimmed.startsWith('-') || trimmed.startsWith('*')) {
-                html += `<div class="simplexa-bullet">${trimmed.slice(1).trim()}</div>`;
-            } else {
-                html += `<p class="simplexa-paragraph">${trimmed}</p>`;
+            // Crear badge visual junto al elemento
+            const badge = document.createElement('span');
+            badge.className = 'simplexa-label-badge';
+            badge.setAttribute('data-simplexa-badge', id);
+            badge.textContent = `✦ ${label}`;
+            badge.style.cssText = `
+                display: inline-block;
+                background: linear-gradient(135deg, #3b82f6, #6366f1);
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 4px 10px;
+                border-radius: 8px;
+                margin: 2px 4px;
+                box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+                font-family: system-ui, -apple-system, sans-serif;
+                z-index: 2147483646;
+                position: relative;
+                line-height: 1.4;
+                pointer-events: none;
+            `;
+
+            // Resaltar el elemento original
+            node.style.outline = '2px solid #60a5fa';
+            node.style.outlineOffset = '2px';
+            node.style.borderRadius = node.style.borderRadius || '4px';
+
+            // Insertar badge después del elemento
+            if (node.parentNode) {
+                node.parentNode.insertBefore(badge, node.nextSibling);
             }
         }
-
-        return html;
     }
 
     /**
-     * Elimina el overlay de la página.
+     * Remueve todos los badges y resaltados de la página.
+     */
+    function removeLabelsFromPage() {
+        // Quitar badges
+        document.querySelectorAll('[data-simplexa-badge]').forEach(b => b.remove());
+        // Quitar resaltados
+        elementMap.forEach((node) => {
+            node.style.outline = '';
+            node.style.outlineOffset = '';
+            node.removeAttribute('data-simplexa-id');
+        });
+        elementMap.clear();
+    }
+
+    /**
+     * Escapa HTML para prevenir XSS en el panel.
+     */
+    function escapeHTML(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    /**
+     * Elimina el overlay y los badges de la página.
      */
     function removeOverlay() {
+        removeLabelsFromPage();
         if (overlayRoot) {
             overlayRoot.remove();
             overlayRoot = null;
@@ -391,44 +713,33 @@
             const schema = scanDOM();
             console.log('[Simplexa] DOM escaneado:', schema.elements.length, 'elementos');
 
-            // 3. Importar y cargar el AI Manager dinámicamente
+            // 3. Enviar al background → offscreen para anlizar
             updateProgress(0.2, 'Preparando la inteligencia artificial...');
 
-            // Importar el módulo de IA
-            const { aiManager } = await import(chrome.runtime.getURL('ai_manager.js'));
-
-            // Configurar callback de progreso
-            aiManager.onProgress((report) => {
-                const progressText = report.text || 'Descargando modelo de IA...';
-                const progressValue = 0.2 + (report.progress || 0) * 0.6;
-                updateProgress(progressValue, progressText);
+            const result = await chrome.runtime.sendMessage({
+                type: 'REQUEST_ANALYZE',
+                elements: schema.elements,
+                pageTitle: schema.page.title,
+                pageUrl: schema.page.url
             });
 
-            // Inicializar si no está listo
-            if (!aiManager.isReady) {
-                await aiManager.initialize();
+            if (!result?.ok) {
+                throw new Error(result?.error || 'Error en el análisis');
             }
 
-            // 4. Generar simplificación
-            updateProgress(0.85, 'Generando instrucciones...');
-            const instructions = await aiManager.simplifyPage(
-                schema.elements,
-                schema.page.title,
-                schema.page.url
-            );
+            console.log('[Simplexa] Análisis generado.');
 
-            // 5. Mostrar resultado
-            showInstructions(instructions);
+            // 4. Mostrar resumen y habilitar chat
+            showSummary(result.summary);
 
         } catch (error) {
             console.error('[Simplexa] Error:', error);
 
-            // Mensajes de error amigables
             let errorMsg = 'No se pudo simplificar la página.';
             if (error.message?.includes('WebGPU')) {
                 errorMsg = 'Tu navegador no soporta WebGPU. Necesitas Chrome 113 o superior con una GPU compatible.';
             } else if (error.message?.includes('model')) {
-                errorMsg = 'Error al cargar el modelo de IA. Verifica tu conexión a internet para la primera descarga.';
+                errorMsg = 'Error al cargar el modelo de IA. Verificá tu conexión a internet para la primera descarga.';
             }
 
             showError(errorMsg);
@@ -459,6 +770,16 @@
 
             case 'PING':
                 sendResponse({ ok: true, active: isActive });
+                break;
+
+            // Recibir progreso del offscreen via background
+            case 'AI_PROGRESS_UPDATE':
+                if (message.payload) {
+                    const progressText = message.payload.text || 'Cargando modelo de IA...';
+                    const progressValue = 0.2 + (message.payload.progress || 0) * 0.6;
+                    updateProgress(progressValue, progressText);
+                }
+                sendResponse({ ok: true });
                 break;
         }
         return true;

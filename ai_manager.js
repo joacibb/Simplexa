@@ -4,8 +4,8 @@
  * usando @mlc-ai/web-llm con WebGPU. Costo $0, 100% local.
  */
 
-// Importar WebLLM desde CDN (compatible con service worker y content script)
-import * as webllm from 'https://esm.run/@mlc-ai/web-llm';
+// Importar WebLLM desde paquete local (bundleado con esbuild)
+import * as webllm from '@mlc-ai/web-llm';
 
 // Modelo ligero recomendado (~600MB primera descarga)
 const DEFAULT_MODEL_ID = 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
@@ -16,6 +16,9 @@ export class AIManager {
         this.modelId = DEFAULT_MODEL_ID;
         this.isReady = false;
         this._onProgress = null;
+        // Historial de conversación por página (para chat interactivo)
+        this._conversationHistory = [];
+        this._pageContext = null;
     }
 
     /**
@@ -28,21 +31,34 @@ export class AIManager {
 
     /**
      * Inicializa el motor WebLLM y descarga/carga el modelo.
+     * WebLLM cachea los archivos internamente en Cache API.
      * @returns {Promise<void>}
      */
     async initialize() {
+        if (this.isReady && this.engine) {
+            console.log('[Simplexa] Modelo ya cargado, reutilizando.');
+            return;
+        }
+
         try {
             this._reportStatus('downloading', 0);
+            let isFirstChunk = true;
 
             const initProgressCallback = (report) => {
                 const progress = report.progress || 0;
+                const text = report.text || '';
+                const isFromCache = text.includes('Loading') || text.includes('loading') || text.includes('cache');
+                const displayText = isFromCache || (!isFirstChunk && progress > 0.5)
+                    ? 'Cargando modelo desde caché...'
+                    : 'Descargando modelo de IA...';
+
+                isFirstChunk = false;
                 this._reportStatus('downloading', progress);
                 if (this._onProgress) {
-                    this._onProgress(report);
+                    this._onProgress({ ...report, text: displayText, progress });
                 }
             };
 
-            // Crear el motor MLC con el modelo seleccionado
             this.engine = await webllm.CreateMLCEngine(this.modelId, {
                 initProgressCallback,
                 logLevel: 'SILENT'
@@ -60,35 +76,90 @@ export class AIManager {
     }
 
     /**
-     * Genera instrucciones simplificadas a partir del esquema DOM de la página.
-     * @param {object} domSchema - Esquema JSON compacto del DOM
+     * Analiza la página y genera un resumen comprensible + acciones clave.
+     * @param {Array} domElements - Elementos escaneados del DOM
      * @param {string} pageTitle - Título de la página
      * @param {string} pageUrl - URL de la página
-     * @returns {Promise<string>} Instrucciones simplificadas en texto
+     * @returns {Promise<string>} Resumen en texto plano para el usuario
      */
-    async simplifyPage(domSchema, pageTitle, pageUrl) {
+    async analyzePage(domElements, pageTitle, pageUrl) {
         if (!this.isReady || !this.engine) {
-            throw new Error('El modelo no está inicializado. Llama a initialize() primero.');
+            throw new Error('El modelo no está inicializado.');
         }
 
-        const systemPrompt = this._buildSystemPrompt();
-        const userPrompt = this._buildUserPrompt(domSchema, pageTitle, pageUrl);
+        // Guardar contexto para el chat posterior
+        this._pageContext = { domElements, pageTitle, pageUrl };
+
+        const systemPrompt = this._buildAnalysisSystemPrompt();
+        const userPrompt = this._buildAnalysisUserPrompt(domElements, pageTitle, pageUrl);
+
+        // Iniciar conversación limpia
+        this._conversationHistory = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ];
 
         try {
             const response = await this.engine.chat.completions.create({
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
-                ],
-                max_tokens: 512,
-                temperature: 0.3, // Baja temperatura para respuestas consistentes
+                messages: this._conversationHistory,
+                max_tokens: 600,
+                temperature: 0.4,
                 top_p: 0.9
             });
 
-            return response.choices[0]?.message?.content || 'No se pudieron generar instrucciones.';
+            const reply = response.choices[0]?.message?.content || 'No pude analizar esta página.';
+
+            // Guardar respuesta en historial
+            this._conversationHistory.push({ role: 'assistant', content: reply });
+
+            return reply;
         } catch (error) {
-            console.error('[Simplexa] Error generando simplificación:', error);
+            console.error('[Simplexa] Error analizando página:', error);
             throw error;
+        }
+    }
+
+    /**
+     * Responde una pregunta del usuario sobre la página actual.
+     * Mantiene el contexto de la conversación.
+     * @param {string} question - Pregunta del usuario
+     * @returns {Promise<string>} Respuesta de la IA
+     */
+    async chat(question) {
+        if (!this.isReady || !this.engine) {
+            throw new Error('El modelo no está inicializado.');
+        }
+
+        // Agregar pregunta al historial
+        this._conversationHistory.push({ role: 'user', content: question });
+
+        // Limitar historial a últimos 10 mensajes (+ system) para no saturar contexto
+        const maxHistory = 12;
+        if (this._conversationHistory.length > maxHistory) {
+            const systemMsg = this._conversationHistory[0];
+            this._conversationHistory = [
+                systemMsg,
+                ...this._conversationHistory.slice(-maxHistory + 1)
+            ];
+        }
+
+        try {
+            const response = await this.engine.chat.completions.create({
+                messages: this._conversationHistory,
+                max_tokens: 400,
+                temperature: 0.5,
+                top_p: 0.9
+            });
+
+            const reply = response.choices[0]?.message?.content || 'No pude entender la pregunta. ¿Podés reformularla?';
+
+            // Guardar respuesta
+            this._conversationHistory.push({ role: 'assistant', content: reply });
+
+            return reply;
+        } catch (error) {
+            console.error('[Simplexa] Error en chat:', error);
+            return 'Hubo un error procesando tu pregunta. Intentá de nuevo.';
         }
     }
 
@@ -100,51 +171,82 @@ export class AIManager {
             await this.engine.unload();
             this.engine = null;
             this.isReady = false;
+            this._conversationHistory = [];
+            this._pageContext = null;
             this._reportStatus('idle', 0);
-            console.log('[Simplexa] Modelo descargado.');
         }
     }
 
     // ── Prompts ────────────────────────────────────────────────────────────
 
     /**
-     * Construye el prompt de sistema para la IA.
+     * Prompt de sistema para análisis de página.
+     * Se enfoca en ENTENDER y EXPLICAR, no en repetir texto.
      */
-    _buildSystemPrompt() {
-        return `Eres un asistente de accesibilidad web llamado Simplexa. Tu trabajo es ayudar a adultos mayores a entender y usar páginas web.
+    _buildAnalysisSystemPrompt() {
+        return `Sos Simplexa, un asistente amable que ayuda a personas mayores a entender páginas web.
 
-REGLAS ESTRICTAS:
-1. Responde SIEMPRE en español claro y sencillo.
-2. Usa frases cortas y directas.
-3. Numera cada paso empezando por 1.
-4. Describe la ubicación visual de los elementos (arriba, abajo, centro, izquierda, derecha).
-5. Usa verbos imperativos: "Haga clic en...", "Escriba su...", "Busque el botón...".
-6. Si ves "[DATO SENSIBLE]" NO menciones ni describas ese campo. Solo di: "Hay un campo protegido para información privada."
-7. Máximo 8 pasos por página.
-8. Agrupa acciones relacionadas.
-9. Ignora elementos decorativos o de publicidad.
-10. Si la página es un formulario, explica qué información pide y dónde enviarla.`;
+TU TRABAJO:
+- Explicar QUÉ es esta página y PARA QUÉ sirve, en 1-2 oraciones simples.
+- Listar las 3-5 acciones más importantes que el usuario puede hacer, explicadas como si hablaras con tu abuela.
+- Si hay formularios, explicar qué datos piden y para qué.
+- Si hay peligros (sitios de compra, datos de tarjeta), avisar con cuidado.
+
+REGLAS:
+1. Hablá en español sencillo, con vos/voseo si es natural.
+2. NO repitas el texto de la página literalmente. Explicá con tus palabras.
+3. Usá frases cortas. Máximo 2 líneas por punto.
+4. Empezá siempre con "📄 Esta página..." para el resumen.
+5. Listá las acciones con emojis descriptivos (🔍 para buscar, 📝 para escribir, 🛒 para comprar, etc).
+6. Si hay campos de contraseña o datos de tarjeta, mencioná que son privados y seguros.
+7. Terminá con una frase invitando a preguntar: "¿Tenés alguna duda? Preguntame lo que quieras."
+8. Si el usuario hace preguntas de seguimiento, respondé basándote en lo que sabés de la página.
+9. NO inventes información que no esté en los elementos de la página.
+10. Respondé como si fueras un familiar paciente, no como un robot.`;
     }
 
     /**
-     * Construye el prompt de usuario con el esquema DOM.
+     * Prompt del usuario con los elementos filtrados de la página.
      */
-    _buildUserPrompt(domSchema, pageTitle, pageUrl) {
-        const schemaStr = JSON.stringify(domSchema, null, 0); // Compacto
-        return `Página: "${pageTitle}"
+    _buildAnalysisUserPrompt(domElements, pageTitle, pageUrl) {
+        // Filtrar solo los elementos más relevantes para el análisis
+        const filtered = this._filterRelevantElements(domElements);
+        const schemaStr = JSON.stringify(filtered, null, 0);
+
+        return `Estoy en esta página web y necesito que me expliques qué es y qué puedo hacer.
+
+Página: "${pageTitle}"
 URL: ${pageUrl}
 
-Elementos encontrados en la página:
+Elementos encontrados:
 ${schemaStr}
 
-Genera instrucciones paso a paso, claras y sencillas, para que un adulto mayor pueda entender y usar esta página. Enfócate en las acciones principales que puede realizar.`;
+Explicame esta página de forma simple. ¿Qué es? ¿Qué puedo hacer acá?`;
+    }
+
+    /**
+     * Filtra y prioriza elementos relevantes para el análisis.
+     * Descarta elementos decorativos, repetidos o poco informativos.
+     */
+    _filterRelevantElements(elements) {
+        const seen = new Set();
+        return elements.filter(el => {
+            // Descartar elementos sin texto útil
+            if (!el.text && !el.placeholder && !el.links) return false;
+
+            // Descartar duplicados por texto
+            const key = (el.text || el.placeholder || '').toLowerCase().trim();
+            if (key && key.length < 2) return false;
+            if (seen.has(key)) return false;
+            seen.add(key);
+
+            // Priorizar: títulos, botones, campos, links principales
+            return true;
+        }).slice(0, 30); // Máximo 30 elementos filtrados
     }
 
     // ── Utilidades internas ────────────────────────────────────────────────
 
-    /**
-     * Reporta el estado del modelo al background script.
-     */
     _reportStatus(status, progress, error = null) {
         try {
             chrome.runtime.sendMessage({

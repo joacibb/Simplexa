@@ -1,0 +1,26 @@
+{
+  "name": "simplexa",
+  "version": "1.0.0",
+  "description": "",
+  "main": "ai_manager.js",
+  "scripts": {
+    "build": "npx esbuild ai_manager.js --bundle --format=esm --outfile=lib/ai_manager.bundle.js --platform=browser --target=chrome113 --external:url --external:fs --external:path",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joacibb/Simplexa.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/joacibb/Simplexa/issues"
+  },
+  "homepage": "https://github.com/joacibb/Simplexa#readme",
+  "devDependencies": {
+    "@mlc-ai/web-llm": "^0.2.81",
+    "esbuild": "^0.27.3"
+  }
+}

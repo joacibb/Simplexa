@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simplexa</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="popup-header">
+      <div class="popup-logo">
+        <span class="popup-icon">✦</span>
+        <h1>Simplexa</h1>
+      </div>
+      <span class="popup-version">v1.0</span>
+    </header>
+
+    <!-- Estado del modelo -->
+    <div class="model-status" id="modelStatus">
+      <div class="status-indicator" id="statusIndicator">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Modelo no cargado</span>
+      </div>
+      <div class="progress-container" id="progressContainer" style="display: none;">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <span class="progress-text" id="progressText">0%</span>
+      </div>
+    </div>
+
+    <!-- Botón principal -->
+    <button class="btn-primary" id="btnSimplify">
+      <span class="btn-icon">🧠</span>
+      <span class="btn-text">Simplificar esta página</span>
+    </button>
+
+    <!-- Botón desactivar -->
+    <button class="btn-secondary" id="btnDeactivate" style="display: none;">
+      <span class="btn-icon">✕</span>
+      <span class="btn-text">Desactivar Simplexa</span>
+    </button>
+
+    <!-- Info de privacidad -->
+    <footer class="popup-footer">
+      <p>🔒 Toda la IA funciona en tu dispositivo.</p>
+      <p>No se envían datos a ningún servidor.</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
